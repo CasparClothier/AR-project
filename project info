@@ -1,0 +1,7 @@
+I am looking to create a pipeline that will take in a file of pre 1950 music.
+This pipeline will operate in the following stages:
+1. Ingest the audio and measure clipping, noise floor, spectral cutoff and produce a mel-spectogram.
+2. These will be fed in to one of two routing options which can be selected.
+3. The first routing option will measure whether the clippin, noise floor, and spectral cutoff are over individual thresholds. After which it will conditionally activate stages of a restoration pipeline. The second routing option will use a router classifier which will take in the mel-spectogram and returns decisions on which restoration stages to activate. 
+4. The restoration pipeline is structured: 1.declip 2.denoise 3.bandwidth_extend
+5.The loudness is normalised

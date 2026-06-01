@@ -1,1 +1,8 @@
-print("hello")
+import soundfile as sf
+import numpy as np
+import librosa
+from scipy import signal
+
+
+# Read audio file and return spectorgram and necessary statistics.
+
