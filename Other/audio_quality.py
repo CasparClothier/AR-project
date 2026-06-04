@@ -2,6 +2,7 @@ import numpy as np
 import librosa
 from typing import Any, Dict
 
+__all__ = ["analyze_audio"]
 
 def _longest_true_run(mask: np.ndarray) -> int:
     if not mask.any():
@@ -50,18 +51,18 @@ def analyze_audio(
     noise_floor_db = float(librosa.amplitude_to_db(np.array([noise_floor_amp]), ref=1.0)[0])
 
     # Spectral cutoff: compute mean power spectrum and find freq at percentile
-    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length)) ** 2
-    freqs = librosa.fft_frequencies(sr=used_sr, n_fft=n_fft)
-    mean_spec = S.mean(axis=1)
-    total_energy = float(mean_spec.sum()) if mean_spec.sum() > 0 else 1.0
-    cum = np.cumsum(mean_spec) / total_energy
-    cutoff_idx = int(np.searchsorted(cum, energy_percentile, side="left"))
-    cutoff_idx = min(max(cutoff_idx, 0), len(freqs) - 1)
-    spectral_cutoff_hz = float(freqs[cutoff_idx])
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length)) ** 2 # Get 2D array of shape (freq_bins, time frames), power of freq at given time.
+    freqs = librosa.fft_frequencies(sr=used_sr, n_fft=n_fft) # get frequencies corresponding to each bin, shape (freq_bins)
+    mean_spec = S.mean(axis=1) # Average power across time for each frequency bin
+    total_energy = float(mean_spec.sum()) if mean_spec.sum() > 0 else 1.0 # Sum power across all frequencies, avoid div by zero when silent
+    cum = np.cumsum(mean_spec) / total_energy # Percentile of energy at each frequency bin
+    cutoff_idx = int(np.searchsorted(cum, energy_percentile, side="left")) # Find index where cumulative energy exceeds percentile
+    cutoff_idx = min(max(cutoff_idx, 0), len(freqs) - 1) # Clamp index to valid range- return either 0 or last index if out of bounds.
+    spectral_cutoff_hz = float(freqs[cutoff_idx]) 
 
     # Mel spectrogram (power) -> dB
     S_mel = librosa.feature.melspectrogram(
-        y=y, sr=used_sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
+        S=S, sr=used_sr, n_mels=n_mels
     )
     S_mel_db = librosa.power_to_db(S_mel, ref=np.max)
 
@@ -76,4 +77,3 @@ def analyze_audio(
     }
 
 
-__all__ = ["analyze_audio"]
