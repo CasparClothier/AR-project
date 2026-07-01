@@ -57,7 +57,7 @@ class PipelineConfig: # Holds all config for a pipeline run; passed to all compo
 # --------------------------------------------------------------------------- #
 # No-op implementations (for testing / demo purposes, to be replaced by real logic later)
 # --------------------------------------------------------------------------- #
-class NoOpStage(Protocol):
+class NoOpStage:
     """A restoration step: transforms audio, may change the sample rate."""
     
 
@@ -71,7 +71,7 @@ class NoOpStage(Protocol):
         return f"<NoOpStage name={self.name!r}>"
 
 
-class NoOpRouter(Protocol):
+class NoOpRouter:
 
     """Decides which restoration stages should run for a given recording."""
 
@@ -116,7 +116,7 @@ def run_pipeline(input_path: str, output_path: str, config: PipelineConfig) -> d
     audio, sr = librosa.load(input_path, sr=config.target_sr) 
 
     # 2. Analyse
-    results = analyze_audio(audio, sr)
+    results = analyze_audio(input_path, config.target_sr) # WARNING: this loads the file again, but we don't have a way to pass the already-loaded audio to the analyzer. Could be optimized later.
 
     # 3. Route — decide which stages run
     router = build_router(config.routing)
