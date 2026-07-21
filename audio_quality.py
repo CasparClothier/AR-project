@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 __all__ = ["analyze_audio"]
 
-def _longest_true_run(mask: np.ndarray) -> int:
+def _longest_true_run(mask: np.ndarray) -> int: # Use longest true run to measure clipping, since clipping is not necessarily evenly distributed. This is a more robust measure than just counting the number of clipped samples.
     if not mask.any():
         return 0
     idx = np.flatnonzero(mask)
