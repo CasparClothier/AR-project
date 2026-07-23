@@ -89,15 +89,14 @@ def apply_clipping(audio: np.ndarray, target_ratio: float) -> np.ndarray:
 def apply_noise(audio: np.ndarray, sr: int, target_noise_floor_db: float, rng: np.random.Generator) -> np.ndarray:
     """Add broadband coloured noise (slight low-frequency emphasis, matching
     the measured surface-hiss profile) at a target RMS level."""
-    noise = rng.standard_normal(len(audio)).astype(np.float32)
+    noise = rng.standard_normal(len(audio)).astype(np.float32) # generate a standard normal distribution of random noise samples with the same length as the input audio signal. The noise is cast to float32 for consistency with the audio data type.
     # Mild low-frequency emphasis: a gentle 1-pole lowpass on the noise itself
-    b, a = signal.butter(1, 4000, btype="low", fs=sr)
-    noise = signal.lfilter(b, a, noise).astype(np.float32)
-
-    target_rms = 10 ** (target_noise_floor_db / 20)
-    noise_rms = np.sqrt(np.mean(noise**2))
-    if noise_rms > 0:
-        noise *= target_rms / noise_rms
+    b, a = signal.butter(1, 4000, btype="low", fs=sr) # apply a 1st-order Butterworth lowpass filter with a cutoff frequency of 4000 Hz to the noise signal. This will emphasize lower frequencies in the noise, making it sound more like surface hiss or tape noise.
+    noise = signal.lfilter(b, a, noise).astype(np.float32) # linear filter as opposed to zero-phase filtering, since phase distortion is not a concern for noise.
+    target_rms = 10 ** (target_noise_floor_db / 20) # convert the target noise floor from dB to linear RMS amplitude. 
+    noise_rms = np.sqrt(np.mean(noise**2)) 
+    if noise_rms > 0: 
+        noise *= target_rms / noise_rms # scale the noise signal to achieve the desired RMS level. This ensures that the added noise has the correct amplitude relative to the audio signal.
     return (audio + noise).astype(np.float32)
 
 
@@ -115,7 +114,7 @@ def degrade(
     """Apply a full degradation profile to clean audio. Deterministic if `seed` given."""
     rng = np.random.default_rng(seed)
 
-    out = apply_lowpass(audio, sr, profile.spectral_cutoff_hz, profile.filter_order)
+    out = apply_lowpass(audio, sr, profile.spectral_cutoff_hz, profile.filter_order) 
     out = apply_clipping(out, profile.clipping_ratio)
     out = apply_noise(out, sr, profile.noise_floor_db, rng)
 
