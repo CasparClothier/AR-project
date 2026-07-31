@@ -13,8 +13,8 @@ def _longest_true_run(mask: np.ndarray) -> int: # Use longest true run to measur
 
 
 def analyze_audio(
-    path: str,
-    sr: int | None = 22050,
+    y: np.ndarray, # SWITCHED from path
+    used_sr: int | None = 22050,
     n_fft: int = 2048,
     hop_length: int = 512,
     n_mels: int = 128,
@@ -34,7 +34,7 @@ def analyze_audio(
       - Uses `librosa` for reading and feature extraction.
       - `sr=None` preserves original sample rate.
     """
-    y, used_sr = librosa.load(path, sr=sr)
+    # y, used_sr = librosa.load(path, sr=sr)
     total_samples = y.shape[0]
     duration_seconds = float(total_samples) / used_sr
 

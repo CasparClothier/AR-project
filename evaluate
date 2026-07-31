@@ -105,7 +105,7 @@ def log_spectral_distance(
 # Per-pair evaluation
 # --------------------------------------------------------------------------- #
 @dataclass
-class EvaluationResult:
+class EvaluationResult: # data class to hold the evaluation results for a single pair of audio files (clean and processed). It contains the following fields:
     pair_id: str
     si_sdr_db: float
     lsd_db: float
@@ -114,7 +114,7 @@ class EvaluationResult:
         return asdict(self)
 
 
-def evaluate_pair(
+def evaluate_pair( 
     clean: np.ndarray,
     processed: np.ndarray,
     sr: int,
