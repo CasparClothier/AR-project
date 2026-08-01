@@ -117,7 +117,7 @@ def run_pipeline_on_pairs(manifest: list[dict[str, Any]], out_dir: Path) -> None
         from pipeline2 import run_pipeline, PipelineConfig
     except ImportError:
         try:
-            from pipeline import run_pipeline, PipelineConfig
+            from pipeline1 import run_pipeline, PipelineConfig
         except ImportError:
             print("\n! Could not import run_pipeline; skipping pipeline stage.")
             print("  (Rename the import in run_pipeline_on_pairs to match your module.)")
