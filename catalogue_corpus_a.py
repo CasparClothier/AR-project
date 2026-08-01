@@ -41,7 +41,7 @@ CSV_FIELDS = [
 def find_audio_files(input_dir: Path) -> list[Path]:
     """Recursively find all audio files, sorted for deterministic ordering."""
     return sorted(
-        p for p in input_dir.rglob("*")
+        p for p in input_dir.rglob("*") # 
         if p.suffix.lower() in AUDIO_EXTENSIONS and p.is_file()
     )
 

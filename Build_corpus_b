@@ -1,0 +1,237 @@
+"""Task 1: Build Corpus B and run the degrade -> pipeline -> evaluate loop.
+
+Produces, for each (clean track x degradation profile) combination:
+  data/corpus_b/clean/{track}__{profile}.wav       (the reference)
+  data/corpus_b/degraded/{track}__{profile}.wav    (pipeline input)
+  data/corpus_b/processed/{track}__{profile}.wav   (pipeline output)
+and a CSV of SI-SDR / LSD for two comparisons:
+  - degraded  vs clean : how bad the damage is (the baseline to beat)
+  - processed vs clean : how well the pipeline did
+
+With no-op stages these two should be nearly IDENTICAL. That's the sanity
+check: it proves the harness measures real degradation and that the pipeline
+isn't secretly altering audio. Once real restoration stages go in, the
+processed row should improve while the degraded row stays fixed.
+
+Usage:
+    python build_corpus_b.py --musdb-dir path/to/musdb18hq/train --n-tracks 8
+    python build_corpus_b.py --musdb-dir path/to/musdb18hq/train --n-tracks 8 --skip-pipeline
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import librosa
+import soundfile as sf
+
+from degrader import degrade, DegradationProfile, PRESET_PARKER_BOOTLEG, PRESET_JUKEBOX_ACOUSTIC
+#from degrader import PRESET_JUKEBOX_ACOUSTIC
+from evaluate import evaluate_pair
+
+
+# Profiles to apply. Extend this dict once catalogue_corpus_a.py reveals
+# the real cluster profiles in your corpus.
+PROFILES: dict[str, DegradationProfile] = {
+    "parker": PRESET_PARKER_BOOTLEG,
+    "acoustic": PRESET_JUKEBOX_ACOUSTIC,
+}
+
+
+def find_musdb_mixtures(musdb_dir: Path, limit: int | None = None) -> list[Path]:
+    """MUSDB18-HQ stores each track as a folder containing mixture.wav."""
+    mixtures = sorted(musdb_dir.glob("*/mixture.wav"))
+    if not mixtures:
+        # Fall back to flat layout of plain wav files
+        mixtures = sorted(p for p in musdb_dir.glob("*.wav"))
+    return mixtures[:limit] if limit else mixtures
+
+
+def safe_stem(path: Path) -> str:
+    """Track name from a MUSDB folder layout, sanitised for filenames."""
+    name = path.parent.name if path.name == "mixture.wav" else path.stem
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:40]
+
+
+def build_pairs(
+    musdb_dir: Path,
+    out_dir: Path,
+    n_tracks: int,
+    excerpt_seconds: float,
+    sr: int,
+    seed: int,
+) -> list[dict[str, Any]]:
+    """Create clean + degraded pairs for every (track, profile) combination."""
+    clean_dir = out_dir / "clean"
+    degraded_dir = out_dir / "degraded"
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    degraded_dir.mkdir(parents=True, exist_ok=True)
+
+    mixtures = find_musdb_mixtures(musdb_dir, limit=n_tracks)
+    if not mixtures:
+        raise SystemExit(f"No mixture.wav or .wav files found under {musdb_dir}")
+
+    print(f"Found {len(mixtures)} source track(s); applying {len(PROFILES)} profile(s)")
+    manifest = []
+
+    for track_path in mixtures:
+        stem = safe_stem(track_path)
+        audio, loaded_sr = librosa.load(track_path, sr=sr, mono=True)
+
+        n_samples = int(excerpt_seconds * loaded_sr)
+        if len(audio) < n_samples:
+            print(f"  ! {stem}: shorter than {excerpt_seconds}s, using full length")
+            excerpt = audio
+        else:
+            # Take from 30s in — avoids intros/fade-ins that are often atypical
+            start = min(int(30 * loaded_sr), len(audio) - n_samples)
+            excerpt = audio[start:start + n_samples]
+
+        for profile_name, profile in PROFILES.items():
+            pair_id = f"{stem}__{profile_name}"
+            degraded = degrade(excerpt, loaded_sr, profile, seed=seed)
+
+            sf.write(clean_dir / f"{pair_id}.wav", excerpt, loaded_sr)
+            sf.write(degraded_dir / f"{pair_id}.wav", degraded, loaded_sr)
+
+            manifest.append({
+                "pair_id": pair_id,
+                "track": stem,
+                "profile": profile_name,
+                "sr": loaded_sr,
+                "clean_path": str(clean_dir / f"{pair_id}.wav"),
+                "degraded_path": str(degraded_dir / f"{pair_id}.wav"),
+            })
+            print(f"  built {pair_id}")
+
+    return manifest
+
+
+def run_pipeline_on_pairs(manifest: list[dict[str, Any]], out_dir: Path) -> None:
+    """Run each degraded file through the pipeline, writing to processed/."""
+    try:
+        from pipeline2 import run_pipeline, PipelineConfig
+    except ImportError:
+        try:
+            from pipeline import run_pipeline, PipelineConfig
+        except ImportError:
+            print("\n! Could not import run_pipeline; skipping pipeline stage.")
+            print("  (Rename the import in run_pipeline_on_pairs to match your module.)")
+            return
+
+    processed_dir = out_dir / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = PipelineConfig(target_sr=None)
+    print(f"\nRunning pipeline on {len(manifest)} degraded file(s)...")
+    for entry in manifest:
+        out_path = processed_dir / f"{entry['pair_id']}.wav"
+        try:
+            run_pipeline(entry["degraded_path"], str(out_path), cfg)
+            entry["processed_path"] = str(out_path)
+        except Exception as exc:
+            print(f"  ! {entry['pair_id']}: {type(exc).__name__}: {exc}")
+            entry["processed_path"] = None
+
+
+def evaluate_all(manifest: list[dict[str, Any]], csv_path: Path) -> None:
+    """Score degraded-vs-clean and processed-vs-clean for every pair."""
+    rows = []
+    for entry in manifest:
+        clean, sr = librosa.load(entry["clean_path"], sr=None)
+        degraded, _ = librosa.load(entry["degraded_path"], sr=None)
+
+        deg_result = evaluate_pair(clean, degraded, sr, pair_id=entry["pair_id"])
+        row = {
+            "pair_id": entry["pair_id"],
+            "track": entry["track"],
+            "profile": entry["profile"],
+            "degraded_si_sdr_db": round(deg_result.si_sdr_db, 3),
+            "degraded_lsd_db": round(deg_result.lsd_db, 3),
+            "processed_si_sdr_db": "",
+            "processed_lsd_db": "",
+        }
+
+        proc_path = entry.get("processed_path")
+        if proc_path and Path(proc_path).exists():
+            processed, proc_sr = librosa.load(proc_path, sr=None)
+            if proc_sr != sr:
+                processed = librosa.resample(processed, orig_sr=proc_sr, target_sr=sr)
+            proc_result = evaluate_pair(clean, processed, sr, pair_id=entry["pair_id"])
+            row["processed_si_sdr_db"] = round(proc_result.si_sdr_db, 3)
+            row["processed_lsd_db"] = round(proc_result.lsd_db, 3)
+
+        rows.append(row)
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"\nResults written to {csv_path}")
+    summarise_results(rows)
+
+
+def summarise_results(rows: list[dict[str, Any]]) -> None:
+    print(f"\n{'='*66}")
+    print("BASELINE SUMMARY (by degradation profile)")
+    print(f"{'='*66}")
+
+    profiles = sorted({r["profile"] for r in rows})
+    for profile in profiles:
+        subset = [r for r in rows if r["profile"] == profile]
+        deg_sdr = [r["degraded_si_sdr_db"] for r in subset if np.isfinite(r["degraded_si_sdr_db"])]
+        deg_lsd = [r["degraded_lsd_db"] for r in subset if np.isfinite(r["degraded_lsd_db"])]
+        print(f"\n{profile}  (n={len(subset)})")
+        if deg_sdr:
+            print(f"  degraded  SI-SDR median: {np.median(deg_sdr):7.2f} dB")
+            print(f"  degraded  LSD    median: {np.median(deg_lsd):7.2f} dB")
+
+        proc_sdr = [r["processed_si_sdr_db"] for r in subset
+                    if r["processed_si_sdr_db"] != "" and np.isfinite(r["processed_si_sdr_db"])]
+        proc_lsd = [r["processed_lsd_db"] for r in subset
+                    if r["processed_lsd_db"] != "" and np.isfinite(r["processed_lsd_db"])]
+        if proc_sdr:
+            print(f"  processed SI-SDR median: {np.median(proc_sdr):7.2f} dB "
+                  f"(delta {np.median(proc_sdr) - np.median(deg_sdr):+.2f})")
+            print(f"  processed LSD    median: {np.median(proc_lsd):7.2f} dB "
+                  f"(delta {np.median(proc_lsd) - np.median(deg_lsd):+.2f})")
+
+    print(f"\n{'-'*66}")
+    print("SANITY CHECK: with no-op stages, processed should ~= degraded")
+    print("(deltas near zero). Once real stages go in, SI-SDR delta should")
+    print("go positive and LSD delta negative.")
+    print(f"{'-'*66}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Build Corpus B and run the evaluation loop.")
+    ap.add_argument("--musdb-dir", type=Path, required=True, help="MUSDB18-HQ train/ or test/ dir")
+    ap.add_argument("--out-dir", type=Path, default=Path("data/corpus_b"))
+    ap.add_argument("--results", type=Path, default=Path("results/corpus_b_baseline.csv"))
+    ap.add_argument("--n-tracks", type=int, default=8)
+    ap.add_argument("--excerpt-seconds", type=float, default=30.0)
+    ap.add_argument("--sr", type=int, default=44100)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--skip-pipeline", action="store_true",
+                    help="Only build + evaluate degraded pairs, don't run the pipeline")
+    args = ap.parse_args()
+
+    manifest = build_pairs(
+        args.musdb_dir, args.out_dir, args.n_tracks,
+        args.excerpt_seconds, args.sr, args.seed,
+    )
+
+    if not args.skip_pipeline:
+        run_pipeline_on_pairs(manifest, args.out_dir)
+
+    evaluate_all(manifest, args.results)
+
+
+if __name__ == "__main__":
+    main()

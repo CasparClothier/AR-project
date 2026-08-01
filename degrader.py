@@ -51,10 +51,10 @@ PRESET_PARKER_BOOTLEG = DegradationProfile(
     noise_floor_db=-40.0,
 )
 
-PRESET_ACOUSTIC_ERA = DegradationProfile(   # e.g. the Jukebox / LoC file
-    spectral_cutoff_hz=3500.0,
+PRESET_JUKEBOX_ACOUSTIC = DegradationProfile(   # e.g. the Jukebox / LoC file
+    spectral_cutoff_hz=2200.0,
     clipping_ratio=0.0,
-    noise_floor_db=-30.0,
+    noise_floor_db=-25.0,
 )
 
 
@@ -129,7 +129,7 @@ def degrade(
 __all__ = [
     "DegradationProfile",
     "PRESET_PARKER_BOOTLEG",
-    "PRESET_ACOUSTIC_ERA",
+    "PRESET_JUKEBOX_ACOUSTIC",
     "apply_lowpass",
     "apply_clipping",
     "apply_noise",
