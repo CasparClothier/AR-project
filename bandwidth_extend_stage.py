@@ -1,24 +1,24 @@
-"""AudioSR bandwidth-extension stage.
+"""AudioSR bandwidth-extension stage — batched version.
 
-AudioSR is invoked as a subprocess (its CLI), not imported directly, since it
-lives in a separate venv (audiosr-venv) with a dependency stack that conflicts
-with the main project environment (numpy<=1.23.5, torch==2.4.0, etc. — see
-project notes on environment setup).
+AudioSR is invoked via its `-il` (input file list) batch mode, which loads
+the model ONCE and processes every listed file within that single process.
+This matters enormously on CPU: model loading takes ~5-6 minutes, dwarfing
+the ~60s/chunk sampling cost. An earlier per-chunk-subprocess design reloaded
+the model for every chunk (~6-7 min/chunk), making a 60-file corpus batch
+run take 36+ hours. Batching brings a 30s file (6 chunks) down to roughly
+one model load + 6x sampling time (~11-12 min), and a 60-file corpus to
+roughly 11-12 hours — workable as an overnight run.
 
 AudioSR performs best on short (~5s) inputs and degrades on longer ones, so
-this stage chunks the input, processes each chunk independently, and
-recombines with a short linear crossfade to avoid audible clicks at chunk
-boundaries.
-
-The chunking/crossfade logic is pure and independently testable (see
-verify_bandwidth_stage.py) without needing AudioSR itself installed or running
-— important given how much environment work it took to get AudioSR running
-at all.
+this stage chunks the input, processes all chunks for one file in a single
+batched subprocess call, and recombines with a short linear crossfade to
+avoid audible clicks at chunk boundaries.
 """
 
 from __future__ import annotations
 
 import glob
+import os
 import subprocess
 import tempfile
 import shutil
@@ -30,7 +30,7 @@ import soundfile as sf
 
 # --------------------------------------------------------------------------- #
 # Pure helpers — chunking and recombination, no subprocess involved.
-# Testable in isolation with synthetic arrays.
+# Testable in isolation with synthetic arrays (see verify_bandwidth_stage.py).
 # --------------------------------------------------------------------------- #
 def chunk_audio(
     audio: np.ndarray,
@@ -44,18 +44,18 @@ def chunk_audio(
     has material to blend. The final chunk always reaches exactly the end of
     the audio, even if shorter than a full chunk.
     """
-    chunk_len = int(chunk_seconds * sr) 
+    chunk_len = int(chunk_seconds * sr)
     overlap_len = int(overlap_seconds * sr)
     hop = chunk_len - overlap_len
     if hop <= 0:
         raise ValueError("overlap_seconds must be smaller than chunk_seconds")
 
-    if len(audio) <= chunk_len: 
+    if len(audio) <= chunk_len:
         return [audio]
 
     chunks = []
     idx = 0
-    while idx < len(audio): # propogate until the last chunk reaches the end of the audio
+    while idx < len(audio):
         end = min(idx + chunk_len, len(audio))
         chunks.append(audio[idx:end])
         if end == len(audio):
@@ -98,115 +98,118 @@ def crossfade_concat(
     return result
 
 
+def find_processed_output(out_dir: Path, chunk_stem: str) -> Path:
+    """Locate AudioSR's output file for a given input chunk stem.
+
+    AudioSR writes to a TIMESTAMPED SUBFOLDER under out_dir with a fixed
+    suffix pattern: '<stem>_AudioSR_Processed_48K.wav'. We search rather
+    than construct the path since we don't control the timestamp component.
+    """
+    matches = glob.glob(str(out_dir / "**" / f"{chunk_stem}_AudioSR_Processed_48K.wav"), recursive=True)
+    if not matches:
+        raise RuntimeError(f"No AudioSR output found for chunk '{chunk_stem}' under {out_dir}")
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"Ambiguous output for chunk '{chunk_stem}': found {len(matches)} matches under {out_dir}. "
+            f"Use a fresh out_dir per file to avoid this."
+        )
+    return Path(matches[0])
+
+
 # --------------------------------------------------------------------------- #
 # The Stage
 # --------------------------------------------------------------------------- #
 class BandwidthExtendStage:
-    """Restoration stage wrapping AudioSR via subprocess.
+    """Restoration stage wrapping AudioSR via its batch-mode CLI.
 
-    AudioSR's own model runs in a separate venv; this class shells out to its
-    CLI entry point rather than importing it directly.
+    AudioSR's model runs in a separate venv; this class shells out to its
+    Python interpreter directly (bypassing the .cmd/.exe entry-point wrapper,
+    which resolves 'python' via the CALLING process's PATH rather than the
+    target venv's own interpreter).
     """
 
     def __init__(
         self,
-        audiosr_executable: str,
+        audiosr_python: str,
         model_name: str = "basic",
         ddim_steps: int = 25,
         seed: int = 42,
         chunk_seconds: float = 5.0,
         overlap_seconds: float = 0.25,
         output_sr: int = 48000,
+        timeout_seconds: int = 1800,
     ) -> None:
         self.name = "bandwidth_extend"
-        self.audiosr_executable = audiosr_executable
+        self.audiosr_python = audiosr_python
         self.model_name = model_name
         self.ddim_steps = ddim_steps
         self.seed = seed
         self.chunk_seconds = chunk_seconds
         self.overlap_seconds = overlap_seconds
         self.output_sr = output_sr
-
-    def _run_audiosr_on_chunk(self, chunk: np.ndarray, sr: int, work_dir: Path) -> np.ndarray:
-        """Write one chunk to disk, run AudioSR on it, load and return the result."""
-        chunk_in_path = work_dir / "chunk_in.wav"
-        chunk_out_dir = work_dir / "chunk_out"
-        chunk_out_dir.mkdir(exist_ok=True)
-
-        sf.write(chunk_in_path, chunk, sr)
-
-        #result = subprocess.run(
-        #    [
-        #        self.audiosr_executable,
-        #        "-i", str(chunk_in_path),
-        #        "-s", str(chunk_out_dir),
-        #        "--model_name", self.model_name,
-        #        "--ddim_steps", str(self.ddim_steps),
-        #        "--seed", str(self.seed),
-        #    ],
-        #    capture_output=True,
-        #    text=True,
-        #    timeout = 300
-        #)
-
-        result = subprocess.run(
-            [
-                r"C:\dev\venvs\audiosr-venv\Scripts\python.exe",
-                "-m", "audiosr",
-                "-i", str(chunk_in_path),
-                "-s", str(chunk_out_dir),
-                "--model_name", self.model_name,
-                "--ddim_steps", str(self.ddim_steps),
-                "--seed", str(self.seed),
-            ],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        )
-
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"AudioSR subprocess failed (exit {result.returncode}):\n"
-                f"stdout: {result.stdout[-2000:]}\n"
-                f"stderr: {result.stderr[-2000:]}"
-            )
-
-        # Output lands under a timestamped subfolder with a fixed suffix;
-        # search rather than construct the path, since we don't control
-        # the timestamp component.
-        matches = glob.glob(str(chunk_out_dir / "**" / "*_AudioSR_Processed_48K.wav"), recursive=True)
-        if not matches:
-            raise RuntimeError(
-                f"AudioSR reported success but no output file found under {chunk_out_dir}.\n"
-                f"stdout: {result.stdout[-1000:]}"
-            )
-
-        out_audio, out_sr = sf.read(matches[0])
-        if out_sr != self.output_sr:
-            raise RuntimeError(f"Expected AudioSR output at {self.output_sr} Hz, got {out_sr} Hz")
-        return out_audio
+        self.timeout_seconds = timeout_seconds
 
     def process(self, audio: np.ndarray, sr: int) -> tuple[np.ndarray, int]:
         chunks = chunk_audio(audio, sr, self.chunk_seconds, self.overlap_seconds)
 
         work_root = Path(tempfile.mkdtemp(prefix="audiosr_stage_"))
         try:
-            processed_chunks = []
+            # Write every chunk to disk, in order, with predictable names
+            chunk_paths = []
             for i, chunk in enumerate(chunks):
-                chunk_work_dir = work_root / f"chunk_{i:03d}"
-                chunk_work_dir.mkdir(parents=True, exist_ok=True)
-                processed = self._run_audiosr_on_chunk(chunk, sr, chunk_work_dir)
-                processed_chunks.append(processed)
+                chunk_path = work_root / f"chunk_{i:03d}.wav"
+                sf.write(chunk_path, chunk, sr)
+                chunk_paths.append(chunk_path)
 
-            # Overlap length in OUTPUT sample-rate units (AudioSR resamples,
-            # e.g. 44100 -> 48000, so the overlap region is proportionally longer)
+            # One batch list -> one subprocess call -> ONE model load
+            batch_list_path = work_root / "batch.lst"
+            batch_list_path.write_text("\n".join(str(p) for p in chunk_paths))
+
+            out_dir = work_root / "batch_out"
+            out_dir.mkdir()
+
+            env = os.environ.copy()
+            env["HF_HUB_OFFLINE"] = "1"
+            env["TRANSFORMERS_OFFLINE"] = "1"
+
+            result = subprocess.run(
+                [
+                    self.audiosr_python, "-m", "audiosr",
+                    "-il", str(batch_list_path),
+                    "-s", str(out_dir),
+                    "--model_name", self.model_name,
+                    "--ddim_steps", str(self.ddim_steps),
+                    "--seed", str(self.seed),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=self.timeout_seconds,
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"AudioSR batch subprocess failed (exit {result.returncode}):\n"
+                    f"stdout: {result.stdout[-2000:]}\n"
+                    f"stderr: {result.stderr[-2000:]}"
+                )
+
+            # Collect outputs IN THE SAME ORDER as chunk_paths — order matters,
+            # since crossfade_concat blends adjacent chunks sequentially.
+            processed_chunks = []
+            for chunk_path in chunk_paths:
+                out_path = find_processed_output(out_dir, chunk_path.stem)
+                out_audio, out_sr = sf.read(out_path)
+                if out_sr != self.output_sr:
+                    raise RuntimeError(f"Expected {self.output_sr} Hz, got {out_sr} Hz for {chunk_path.name}")
+                processed_chunks.append(out_audio)
+
             overlap_samples_out = int(self.overlap_seconds * self.output_sr)
-            result = crossfade_concat(processed_chunks, overlap_samples_out)
+            result_audio = crossfade_concat(processed_chunks, overlap_samples_out)
 
-            return result.astype(np.float32), self.output_sr
+            return result_audio.astype(np.float32), self.output_sr
         finally:
             shutil.rmtree(work_root, ignore_errors=True)
 
 
-__all__ = ["BandwidthExtendStage", "chunk_audio", "crossfade_concat"]
+__all__ = ["BandwidthExtendStage", "chunk_audio", "crossfade_concat", "find_processed_output"]
