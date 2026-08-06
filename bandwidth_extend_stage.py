@@ -192,7 +192,7 @@ class BandwidthExtendStage:
 
             env = os.environ.copy()
             env["HF_HUB_OFFLINE"] = "1"
-            env["TRANSFORMERS_OFFLINE"] = "1"
+            env["TRANSFORMERS_OFFLINE"] = "1" # use offline mode to avoid network calls during inference
 
             result = subprocess.run(
                 [

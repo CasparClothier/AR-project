@@ -1,7 +1,7 @@
 import time
 import librosa
 import soundfile as sf
-from bandwidth_extend_stage_old import BandwidthExtendStage
+from bandwidth_extend_stage import BandwidthExtendStage
 
 # Pick a real degraded acoustic-profile clip from your Corpus B
 input_path = r"data\corpus_b\degraded\A_Classic_Education_-_NightOwl__acoustic.wav"
