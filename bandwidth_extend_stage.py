@@ -98,6 +98,27 @@ def crossfade_concat(
     return result
 
 
+def match_rms(audio: np.ndarray, reference: np.ndarray, max_gain_db: float = 12.0) -> np.ndarray:
+    """Rescale `audio` so its RMS matches `reference`'s RMS.
+
+    Used to correct per-chunk loudness inconsistency introduced by AudioSR
+    generating each chunk independently. `max_gain_db` caps the correction
+    to avoid wildly amplifying a near-silent chunk (e.g. a rest in the
+    music) based on a near-zero reference RMS.
+    """
+    ref_rms = np.sqrt(np.mean(reference.astype(np.float64) ** 2))
+    audio_rms = np.sqrt(np.mean(audio.astype(np.float64) ** 2))
+
+    if ref_rms < 1e-8 or audio_rms < 1e-8:
+        return audio  # one side is silent; scaling is meaningless, leave as-is
+
+    gain = ref_rms / audio_rms
+    max_gain = 10 ** (max_gain_db / 20)
+    gain = float(np.clip(gain, 1 / max_gain, max_gain))
+
+    return (audio * gain).astype(audio.dtype)
+
+
 def find_processed_output(out_dir: Path, chunk_stem: str) -> Path:
     """Locate AudioSR's output file for a given input chunk stem.
 
@@ -150,6 +171,7 @@ class BandwidthExtendStage:
         self.timeout_seconds = timeout_seconds
 
     def process(self, audio: np.ndarray, sr: int) -> tuple[np.ndarray, int]:
+        print(">>> RUNNING BATCHED VERSION <<<", flush=True)
         chunks = chunk_audio(audio, sr, self.chunk_seconds, self.overlap_seconds)
 
         work_root = Path(tempfile.mkdtemp(prefix="audiosr_stage_"))
@@ -196,12 +218,23 @@ class BandwidthExtendStage:
 
             # Collect outputs IN THE SAME ORDER as chunk_paths — order matters,
             # since crossfade_concat blends adjacent chunks sequentially.
+            #
+            # Each chunk is generated independently by AudioSR with no
+            # awareness of its neighbours, which introduces a per-chunk
+            # loudness inconsistency distinct from genuine musical dynamics
+            # (confirmed empirically: boundary RMS jumps of 1-3 dB, same
+            # order of magnitude as natural within-track variation, but
+            # specifically correlated with chunk edges). Rescale each
+            # output chunk to match ITS OWN input chunk's RMS, removing
+            # this artefact while preserving real dynamics.
             processed_chunks = []
-            for chunk_path in chunk_paths:
+            for chunk, chunk_path in zip(chunks, chunk_paths):
                 out_path = find_processed_output(out_dir, chunk_path.stem)
                 out_audio, out_sr = sf.read(out_path)
                 if out_sr != self.output_sr:
                     raise RuntimeError(f"Expected {self.output_sr} Hz, got {out_sr} Hz for {chunk_path.name}")
+
+                out_audio = match_rms(out_audio, reference=chunk)
                 processed_chunks.append(out_audio)
 
             overlap_samples_out = int(self.overlap_seconds * self.output_sr)
