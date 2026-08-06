@@ -14,6 +14,7 @@ touching `run_pipeline`.
 
 from __future__ import annotations
 
+from bandwidth_extend_stage import BandwidthExtendStage
 from audio_quality import analyze_audio
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -83,21 +84,77 @@ class NoOpRouter:
     def __repr__(self) -> str:
         return "<NoOpRouter (enables none)>"
 
+
+
+@dataclass
+class ThresholdRouter:
+    """Router that activates stages by comparing measured stats to fixed thresholds.
+
+    Defaults set from the Corpus A catalogue (30 recordings, LoC National
+    Jukebox collection): clipping never occurs on real data (median 0.0),
+    spectral cutoff is uniformly severe (median ~2191 Hz), noise floor is
+    the one axis with genuine spread (median ~-24.9 dB, range -33.6 to -21.5 dB).
+    """
+
+    clipping_ratio_threshold: float = 0.005
+    spectral_cutoff_threshold_hz: float = 12000.0
+    noise_floor_threshold_db: float = -28.0
+
+    name = "threshold_router"
+
+    def decide(self, stats: dict[str, Any], mel_db: np.ndarray) -> dict[str, bool]:
+        return {
+            "declip": stats["clipping_ratio"] > self.clipping_ratio_threshold,
+            "denoise": stats["noise_floor_db"] > self.noise_floor_threshold_db,
+            "bandwidth_extend": stats["spectral_cutoff_hz"] < self.spectral_cutoff_threshold_hz,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"<ThresholdRouter clip>{self.clipping_ratio_threshold} "
+            f"noise>{self.noise_floor_threshold_db}dB "
+            f"cutoff<{self.spectral_cutoff_threshold_hz}Hz>"
+        )
+
+
+
 # --------------------------------------------------------------------------- #
 # Factories — swap to introduce real routers / stages later
 # --------------------------------------------------------------------------- #
-def build_router(config: dict[str, Any] | None = None) -> Router:
+#def build_router(config: dict[str, Any] | None = None) -> Router:
     # later: dispatch on config["type"] -> ThresholdRouter / ClassifierRouter
+#    return NoOpRouter()
+
+def build_router(config=None):
+    config = config or {}
+    if config.get("type") == "threshold":
+        return ThresholdRouter(
+            clipping_ratio_threshold=config.get("clipping_ratio_threshold", 0.005),
+            noise_floor_threshold_db=config.get("noise_floor_threshold_db", -28.0),
+            spectral_cutoff_threshold_hz=config.get("spectral_cutoff_threshold_hz", 12000.0),
+        )
     return NoOpRouter()
 
-
-def build_stages(config: dict[str, Any] | None = None) -> list[Stage]:
+#def build_stages(config: dict[str, Any] | None = None) -> list[Stage]:
     # later: dispatch on config -> DeclipStage / DenoiseStage / BandwidthExtendStage
     # Order matters: declip (fix waveform) -> denoise -> bandwidth_extend (fill spectrum)
+#    return [
+#        NoOpStage("declip"),
+#        NoOpStage("denoise"),
+#        NoOpStage("bandwidth_extend"),
+#    ]
+
+def build_stages(config=None):
+    config = config or {}
     return [
         NoOpStage("declip"),
         NoOpStage("denoise"),
-        NoOpStage("bandwidth_extend"),
+        BandwidthExtendStage(
+            audiosr_python=config.get(
+                "audiosr_python",
+                r"C:\dev\venvs\audiosr-venv\Scripts\python.exe",
+            ),
+        ),
     ]
 
 # --------------------------------------------------------------------------- #
