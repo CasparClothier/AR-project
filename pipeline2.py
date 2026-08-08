@@ -15,6 +15,7 @@ touching `run_pipeline`.
 from __future__ import annotations
 
 from bandwidth_extend_stage import BandwidthExtendStage
+from denoise_stage import DenoiseStage
 from audio_quality import analyze_audio
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -79,7 +80,7 @@ class NoOpRouter:
     STAGE_NAMES = ["declip", "denoise", "bandwidth_extend"]
 
     def decide(self, stats: dict[str, Any], mel_db: np.ndarray) -> dict[str, bool]:
-        return {name: False for name in self.STAGE_NAMES}
+        return {name: True for name in self.STAGE_NAMES}
 
     def __repr__(self) -> str:
         return "<NoOpRouter (enables none)>"
@@ -148,6 +149,7 @@ def build_stages(config=None):
     config = config or {}
     return [
         NoOpStage("declip"),
+        #DenoiseStage(),
         NoOpStage("denoise"),
         BandwidthExtendStage(
             audiosr_python=config.get(
